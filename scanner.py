@@ -118,7 +118,7 @@ def analyze(symbol, data):
 
 def main():
     print("US Stock Radar started")
-
+    send_discord("✅ US Stock Radar 디스코드 연결 테스트 성공!")
     snapshots = get_snapshots()
     print(f"Received data for {len(snapshots)} symbols")
 
