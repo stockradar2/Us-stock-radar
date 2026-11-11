@@ -8,8 +8,7 @@ import requests
 BASE = "https://data.alpaca.markets"
 KEY = os.getenv("ALPACA_KEY", "")
 SECRET = os.getenv("ALPACA_SECRET", "")
-BOT = os.getenv("TELEGRAM_BOT_TOKEN", "")
-CHAT = os.getenv("TELEGRAM_CHAT_ID", "")
+DISCORD = os.getenv("DISCORD_WEBHOOK_URL", "")
 
 # 첫 테스트용 감시 목록. 전체시장 검색은 아님.
 SYMBOLS = [
