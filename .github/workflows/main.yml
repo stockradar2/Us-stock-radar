@@ -4,10 +4,15 @@ name: US Stock Radar
 on:
   workflow_dispatch:
   schedule:
-    - cron: '*/20 * * * 1-5'
+    - cron: '*/5 * * * 1-5'
 
 permissions:
   contents: read
+  actions: write
+
+concurrency:
+  group: us-stock-radar
+  cancel-in-progress: false
 
 jobs:
   scan:
@@ -26,9 +31,24 @@ jobs:
       - name: Install packages
         run: pip install requests
 
+      - name: Restore alert history
+        uses: actions/cache/restore@v4
+        with:
+          path: alert_state.json
+          key: radar-alerts-${{ github.run_id }}
+          restore-keys: |
+            radar-alerts-
+
       - name: Run stock scanner
         run: python scanner.py
         env:
           ALPACA_KEY: ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+
+      - name: Save alert history
+        if: success()
+        uses: actions/cache/save@v4
+        with:
+          path: alert_state.json
+          key: radar-alerts-${{ github.run_id }}
