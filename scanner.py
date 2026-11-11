@@ -1,57 +1,103 @@
 
 import os
 from datetime import datetime, timezone
-
 import requests
 
-# API 설정
-ALPACA_KEY = os.getenv("ALPACA_KEY", "")
-ALPACA_SECRET = os.getenv("ALPACA_SECRET", "")
-DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK_URL", "")
+KEY = os.getenv("ALPACA_KEY", "")
+SECRET = os.getenv("ALPACA_SECRET", "")
+DISCORD = os.getenv("DISCORD_WEBHOOK_URL", "")
 
-BASE_URL = "https://data.alpaca.markets"
+BASE = "https://data.alpaca.markets"
 
-# 첫 테스트용 종목 8개
-SYMBOLS = [
-    "AMIX", "PEPG", "WKSP", "SKYE",
-    "CABA", "CLOV", "AMC", "AIOT"
-]
+HEADERS = {
+    "APCA-API-KEY-ID": KEY,
+    "APCA-API-SECRET-KEY": SECRET
+}
 
-
-def send_discord(message):
-    if not DISCORD_WEBHOOK:
-        print("Discord webhook not configured")
-        return
-
-    response = requests.post(
-        DISCORD_WEBHOOK,
-        json={"content": message[:1900]},
-        timeout=15
-    )
-    response.raise_for_status()
-    print("Discord message sent successfully")
+# 미국 저가주 감시 가격: 달러 기준
+MIN_PRICE = 0.01
+MAX_PRICE = 7.00
 
 
-def get_snapshots():
-    if not ALPACA_KEY or not ALPACA_SECRET:
-        raise RuntimeError("Alpaca API keys missing")
-
-    headers = {
-        "APCA-API-KEY-ID": ALPACA_KEY,
-        "APCA-API-SECRET-KEY": ALPACA_SECRET
-    }
-
+def api_get(path, params=None):
     response = requests.get(
-        BASE_URL + "/v2/stocks/snapshots",
-        params={
-            "symbols": ",".join(SYMBOLS),
-            "feed": "iex"
-        },
-        headers=headers,
+        BASE + path,
+        headers=HEADERS,
+        params=params,
         timeout=30
     )
     response.raise_for_status()
     return response.json()
+
+
+def send_discord(message):
+    if not DISCORD:
+        print("Discord webhook missing")
+        return
+
+    response = requests.post(
+        DISCORD,
+        json={"content": message[:1900]},
+        timeout=15
+    )
+    response.raise_for_status()
+    print("Discord alert sent")
+
+
+def discover_symbols():
+    symbols = set()
+
+    # 거래량 상위 종목 자동 검색
+    try:
+        data = api_get(
+            "/v1beta1/screener/stocks/most-actives",
+            {"top": 100, "by": "volume"}
+        )
+
+        for item in data.get("most_actives", []):
+            symbol = item.get("symbol")
+            if symbol:
+                symbols.add(symbol)
+
+    except requests.RequestException as error:
+        print("Most-active search failed:", error)
+
+    # 상승률 상위 종목 자동 검색
+    try:
+        data = api_get(
+            "/v1beta1/screener/stocks/movers",
+            {"top": 50}
+        )
+
+        for item in data.get("gainers", []):
+            symbol = item.get("symbol")
+            if symbol:
+                symbols.add(symbol)
+
+    except requests.RequestException as error:
+        print("Mover search failed:", error)
+
+    print("Discovered candidates:", len(symbols))
+    return sorted(symbols)
+
+
+def get_snapshots(symbols):
+    snapshots = {}
+
+    # 한 번에 최대 100종목 조회
+    for start in range(0, len(symbols), 100):
+        batch = symbols[start:start + 100]
+
+        data = api_get(
+            "/v2/stocks/snapshots",
+            {
+                "symbols": ",".join(batch),
+                "feed": "iex"
+            }
+        )
+        snapshots.update(data)
+
+    return snapshots
 
 
 def analyze(symbol, data):
@@ -60,15 +106,18 @@ def analyze(symbol, data):
     previous = data.get("prevDailyBar") or {}
 
     price = trade.get("p")
-    previous_close = previous.get("c")
+    prev_close = previous.get("c")
     volume = daily.get("v")
-    previous_volume = previous.get("v")
+    prev_volume = previous.get("v")
     timestamp = trade.get("t")
 
     if not all([
-        price, previous_close,
-        volume, previous_volume, timestamp
+        price, prev_close,
+        volume, prev_volume, timestamp
     ]):
+        return None
+
+    if not MIN_PRICE <= price <= MAX_PRICE:
         return None
 
     try:
@@ -81,50 +130,67 @@ def analyze(symbol, data):
     except (ValueError, TypeError):
         return None
 
-    # 30분 넘게 지난 거래는 제외
+    # 30분 이내 실제 거래만 인정
     if age < 0 or age > 1800:
         return None
 
-    change = (price / previous_close - 1) * 100
+    change = (price / prev_close - 1) * 100
 
-    # 전일 전체 거래량 대비 비율
-    # 동일 시간대 상대 거래량(RVOL)은 아님
-    volume_ratio = volume / previous_volume
+    # 전일 전체 거래량 대비 당일 누적 거래량
+    volume_ratio = volume / prev_volume
 
-    if not 0.01 <= price <= 7:
-        return None
+    # 초기 상승 신호
+    if 1 <= change <= 10 and volume_ratio >= 0.3:
+        category = "🔥 초기 상승 관심"
 
-    if volume_ratio < 2:
-        return None
+    # 상승 돌파 관찰
+    elif 10 < change <= 25 and volume_ratio >= 0.5:
+        category = "🚀 상승 돌파 관찰"
 
-    if -3 <= change <= 7:
-        category = "🔥 초기 관심"
-    elif change >= 10:
-        category = "👀 급등 관찰 / 추격 주의"
+    # 이미 크게 상승한 종목
+    elif change > 25 and volume_ratio >= 0.7:
+        category = "⚠️ 급등 종목 / 추격 주의"
+
     else:
         return None
 
-    return (
+    message = (
         f"{category}\n"
         f"종목: {symbol}\n"
-        f"현재가: ${price:.4f}\n"
-        f"등락률: {change:+.2f}%\n"
-        f"당일/전일 거래량: {volume_ratio:.1f}배\n"
-        f"최근 거래 시각(UTC): {timestamp}\n"
+        f"가격: ${price:.4f}\n"
+        f"전일 종가 대비: {change:+.2f}%\n"
+        f"당일/전일 거래량: {volume_ratio:.2f}배\n"
+        f"최근 거래(UTC): {timestamp}\n"
         f"데이터: Alpaca IEX\n"
         f"※ 매수 신호 아님"
     )
+
+    return {
+        "symbol": symbol,
+        "change": change,
+        "message": message
+    }
 
 
 def main():
     print("US Stock Radar started")
 
-    snapshots = get_snapshots()
-    print(f"Received data for {len(snapshots)} symbols")
+    if not KEY or not SECRET:
+        raise RuntimeError("Alpaca API keys missing")
+
+    symbols = discover_symbols()
+
+    if not symbols:
+        print("No candidates discovered")
+        return
+
+    snapshots = get_snapshots(symbols)
+
+    print("Snapshots received:", len(snapshots))
 
     signals = []
 
-    for symbol in SYMBOLS:
+    for symbol in symbols:
         result = analyze(
             symbol,
             snapshots.get(symbol) or {}
@@ -132,15 +198,23 @@ def main():
         if result:
             signals.append(result)
 
-    if signals:
-        message = (
-            "📡 US STOCK RADAR\n\n"
-            + "\n\n".join(signals[:3])
-        )
-        print(message)
-        send_discord(message)
-    else:
+    if not signals:
         print("검증된 조건 충족 신호 없음")
+        return
+
+    # 상승률 낮은 초기 후보부터 표시
+    signals.sort(key=lambda x: x["change"])
+
+    message = "📡 미국 저가주 자동 탐색\n\n"
+
+    for signal in signals[:3]:
+        next_message = message + signal["message"] + "\n\n"
+        if len(next_message) > 1900:
+            break
+        message = next_message
+
+    print(message)
+    send_discord(message)
 
     print("Scan completed")
 
