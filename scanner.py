@@ -157,7 +157,7 @@ def get_recent_bars(symbol):
         }
     )
 
-        return data.get("bars") or []
+    return data.get("bars") or []
 
 def analyze(symbol, snapshot):
     trade = snapshot.get("latestTrade") or {}
