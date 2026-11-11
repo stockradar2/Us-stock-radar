@@ -1,0 +1,30 @@
+
+name: US Stock Radar
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/20 * * * 1-5'
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Download code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install packages
+        run: pip install requests
+
+      - name: Run stock scanner
+        run: python scanner.py
