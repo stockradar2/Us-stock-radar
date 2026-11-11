@@ -1,7 +1,11 @@
 
 import os
+import json
+import time
+from pathlib import Path
+from datetime import datetime, timezone, timedelta
+
 import requests
-from datetime import datetime, timezone
 
 KEY = os.getenv("ALPACA_KEY", "")
 SECRET = os.getenv("ALPACA_SECRET", "")
@@ -18,6 +22,9 @@ HEADERS = {
 MIN_PRICE = 0.01
 MAX_PRICE = 7.00
 
+STATE_FILE = Path("alert_state.json")
+COOLDOWN_SECONDS = 3600
+
 
 def api_get(base, path, params=None):
     response = requests.get(
@@ -33,7 +40,7 @@ def api_get(base, path, params=None):
 def send_discord(message):
     if not DISCORD:
         print("Discord webhook missing")
-        return
+        return False
 
     response = requests.post(
         DISCORD,
@@ -42,6 +49,7 @@ def send_discord(message):
     )
     response.raise_for_status()
     print("Discord alert sent")
+    return True
 
 
 def discover_symbols():
@@ -76,47 +84,40 @@ def discover_symbols():
     return sorted(symbols)
 
 
-def get_common_stocks(symbols):
-    # Alpaca 종목 정보에서 ETF 제외
+def filter_stocks(symbols):
     assets = api_get(
         TRADING_URL,
         "/v2/assets",
         {"status": "active", "asset_class": "us_equity"}
     )
 
-    allowed = set(symbols)
-    common = set()
+    wanted = set(symbols)
+    allowed = []
+
+    blocked_words = [
+        "ETF", "ETN", "EXCHANGE TRADED FUND",
+        "EXCHANGE-TRADED FUND", "TRUST",
+        "LEVERAGED", "INVERSE", "2X ", "3X "
+    ]
 
     for asset in assets:
         symbol = asset.get("symbol")
-        if symbol not in allowed:
+
+        if symbol not in wanted:
             continue
 
         if not asset.get("tradable", False):
             continue
 
-        # Alpaca가 제공하는 종목명 기반 보조 필터
         name = (asset.get("name") or "").upper()
 
-        blocked = [
-            "ETF",
-            "ETN",
-            "EXCHANGE TRADED FUND",
-            "EXCHANGE-TRADED FUND",
-            "TRUST",
-            "LEVERAGED",
-            "INVERSE",
-            "2X ",
-            "3X "
-        ]
-
-        if any(word in name for word in blocked):
+        if any(word in name for word in blocked_words):
             continue
 
-        common.add(symbol)
+        allowed.append(symbol)
 
-    print("Filtered candidates:", len(common))
-    return sorted(common)
+    print("Filtered candidates:", len(allowed))
+    return sorted(set(allowed))
 
 
 def get_snapshots(symbols):
@@ -136,67 +137,151 @@ def get_snapshots(symbols):
 
         snapshots.update(data)
 
+    print("Snapshots received:", len(snapshots))
     return snapshots
 
 
-def analyze(symbol, data):
-    trade = data.get("latestTrade") or {}
-    daily = data.get("dailyBar") or {}
-    previous = data.get("prevDailyBar") or {}
+def get_recent_bars(symbol):
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(minutes=35)
+
+    data = api_get(
+        DATA_URL,
+        f"/v2/stocks/{symbol}/bars",
+        {
+            "timeframe": "1Min",
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "limit": 100,
+            "feed": "iex"
+        }
+    )
+
+    return data.get("bars", [])
+
+
+def analyze(symbol, snapshot):
+    trade = snapshot.get("latestTrade") or {}
+    previous = snapshot.get("prevDailyBar") or {}
 
     price = trade.get("p")
     prev_close = previous.get("c")
-    volume = daily.get("v")
-    prev_volume = previous.get("v")
-    timestamp = trade.get("t")
 
-    if not all([
-        price, prev_close,
-        volume, prev_volume, timestamp
-    ]):
+    if not price or not prev_close:
         return None
 
     if not MIN_PRICE <= price <= MAX_PRICE:
         return None
 
-    try:
-        trade_time = datetime.fromisoformat(
-            timestamp.replace("Z", "+00:00")
-        )
-        age = (
-            datetime.now(timezone.utc) - trade_time
-        ).total_seconds()
-    except (ValueError, TypeError):
-        return None
-
-    if age < 0 or age > 1800:
-        return None
-
     change = (price / prev_close - 1) * 100
-    volume_ratio = volume / prev_volume
 
-    if 1 <= change <= 10 and volume_ratio >= 0.3:
-        category = "🔥 초기 상승 관심"
-    elif 10 < change <= 25 and volume_ratio >= 0.5:
-        category = "🚀 상승 돌파 관찰"
-    elif change > 25 and volume_ratio >= 0.7:
-        category = "⚠️ 급등 종목 / 추격 주의"
+    # 이미 크게 오른 종목은 초기 탐색에서 제외
+    if change < -3 or change > 25:
+        return None
+
+    try:
+        bars = get_recent_bars(symbol)
+    except requests.RequestException as error:
+        print(symbol, "bar error:", error)
+        return None
+
+    if len(bars) < 4:
+        return None
+
+    now = datetime.now(timezone.utc)
+
+    def parse_time(bar):
+        return datetime.fromisoformat(
+            bar["t"].replace("Z", "+00:00")
+        )
+
+    recent = []
+    previous_five = []
+
+    for bar in bars:
+        try:
+            bar_time = parse_time(bar)
+        except (ValueError, KeyError, TypeError):
+            continue
+
+        age = (now - bar_time).total_seconds()
+
+        if 0 <= age < 300:
+            recent.append(bar)
+        elif 300 <= age < 600:
+            previous_five.append(bar)
+
+    if len(recent) < 2 or len(previous_five) < 2:
+        return None
+
+    recent.sort(key=lambda b: b["t"])
+
+    first_price = recent[0].get("o")
+    last_price = recent[-1].get("c")
+
+    if not first_price or not last_price:
+        return None
+
+    five_min_change = (
+        last_price / first_price - 1
+    ) * 100
+
+    recent_volume = sum(
+        bar.get("v", 0) for bar in recent
+    )
+
+    previous_volume = sum(
+        bar.get("v", 0) for bar in previous_five
+    )
+
+    if previous_volume <= 0:
+        return None
+
+    volume_ratio = recent_volume / previous_volume
+
+    # 최근 5분 가격과 거래량 동시 증가
+    if five_min_change >= 2 and volume_ratio >= 2:
+        category = "🔥 강한 초기 급등 신호"
+
+    elif five_min_change >= 1 and volume_ratio >= 1.5:
+        category = "🚀 초기 상승 관심"
+
     else:
         return None
 
     return {
-        "change": change,
+        "symbol": symbol,
+        "score": five_min_change * volume_ratio,
         "message": (
             f"{category}\n"
             f"종목: {symbol}\n"
             f"가격: ${price:.4f}\n"
             f"전일 대비: {change:+.2f}%\n"
-            f"당일/전일 거래량: {volume_ratio:.2f}배\n"
-            f"최근 거래(UTC): {timestamp}\n"
+            f"최근 5분 상승률: {five_min_change:+.2f}%\n"
+            f"최근 5분 거래량 비율: {volume_ratio:.2f}배\n"
             f"데이터: Alpaca IEX\n"
             f"※ 매수 신호 아님"
         )
     }
+
+
+def load_state():
+    if not STATE_FILE.exists():
+        return {}
+
+    try:
+        return json.loads(
+            STATE_FILE.read_text(encoding="utf-8")
+        )
+    except (ValueError, OSError):
+        return {}
+
+
+def save_state(state):
+    STATE_FILE.write_text(
+        json.dumps(state),
+        encoding="utf-8"
+    )
 
 
 def main():
@@ -211,41 +296,72 @@ def main():
         print("No candidates discovered")
         return
 
-    symbols = get_common_stocks(symbols)
+    symbols = filter_stocks(symbols)
 
     if not symbols:
-        print("No common-stock candidates")
+        print("No filtered candidates")
         return
 
     snapshots = get_snapshots(symbols)
-    print("Snapshots received:", len(snapshots))
 
     signals = []
 
     for symbol in symbols:
-        result = analyze(
-            symbol,
-            snapshots.get(symbol) or {}
-        )
+        snapshot = snapshots.get(symbol) or {}
+
+        result = analyze(symbol, snapshot)
+
         if result:
             signals.append(result)
 
+    print("Early signals found:", len(signals))
+
     if not signals:
-        print("검증된 조건 충족 신호 없음")
+        print("초기 급등 조건 충족 신호 없음")
         return
 
-    signals.sort(key=lambda x: x["change"])
+    signals.sort(
+        key=lambda x: x["score"],
+        reverse=True
+    )
 
-    message = "📡 미국 저가주 자동 탐색\n\n"
+    state = load_state()
+    now_ts = time.time()
+    selected = []
 
-    for signal in signals[:3]:
-        next_message = message + signal["message"] + "\n\n"
-        if len(next_message) > 1900:
+    for signal in signals:
+        symbol = signal["symbol"]
+
+        last_sent = state.get(symbol, 0)
+
+        if now_ts - last_sent < COOLDOWN_SECONDS:
+            continue
+
+        selected.append(signal)
+
+        if len(selected) >= 3:
             break
-        message = next_message
 
-    print(message)
-    send_discord(message)
+    if not selected:
+        print("All signals in cooldown")
+        return
+
+    message = "📡 미국 저가주 초기 급등 탐색\n\n"
+
+    for signal in selected:
+        addition = signal["message"] + "\n\n"
+
+        if len(message + addition) > 1900:
+            break
+
+        message += addition
+
+    if send_discord(message):
+        for signal in selected:
+            state[signal["symbol"]] = now_ts
+
+        save_state(state)
+
     print("Scan completed")
 
 
