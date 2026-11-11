@@ -1,11 +1,8 @@
 
 import os
-import json
-import time
-from pathlib import Path
-from datetime import datetime, timezone, timedelta
-
 import requests
+from collections import Counter
+from datetime import datetime, timezone, timedelta
 
 KEY = os.getenv("ALPACA_KEY", "")
 SECRET = os.getenv("ALPACA_SECRET", "")
@@ -22,16 +19,13 @@ HEADERS = {
 MIN_PRICE = 0.01
 MAX_PRICE = 7.00
 
-STATE_FILE = Path("alert_state.json")
-COOLDOWN_SECONDS = 3600
-
 
 def api_get(base, path, params=None):
     response = requests.get(
         base + path,
         headers=HEADERS,
         params=params,
-        timeout=30
+        timeout=40
     )
     response.raise_for_status()
     return response.json()
@@ -78,7 +72,7 @@ def discover_symbols():
                     symbols.add(symbol)
 
         except requests.RequestException as error:
-            print("Discovery failed:", error)
+            print("Discovery error:", error)
 
     print("Discovered candidates:", len(symbols))
     return sorted(symbols)
@@ -88,16 +82,21 @@ def filter_stocks(symbols):
     assets = api_get(
         TRADING_URL,
         "/v2/assets",
-        {"status": "active", "asset_class": "us_equity"}
+        {
+            "status": "active",
+            "asset_class": "us_equity"
+        }
     )
 
     wanted = set(symbols)
     allowed = []
 
-    blocked_words = [
-        "ETF", "ETN", "EXCHANGE TRADED FUND",
-        "EXCHANGE-TRADED FUND", "TRUST",
-        "LEVERAGED", "INVERSE", "2X ", "3X "
+    blocked = [
+        "ETF", "ETN",
+        "EXCHANGE TRADED FUND",
+        "EXCHANGE-TRADED FUND",
+        "TRUST", "LEVERAGED",
+        "INVERSE", "2X ", "3X "
     ]
 
     for asset in assets:
@@ -111,13 +110,14 @@ def filter_stocks(symbols):
 
         name = (asset.get("name") or "").upper()
 
-        if any(word in name for word in blocked_words):
+        if any(word in name for word in blocked):
             continue
 
         allowed.append(symbol)
 
-    print("Filtered candidates:", len(allowed))
-    return sorted(set(allowed))
+    result = sorted(set(allowed))
+    print("Filtered candidates:", len(result))
+    return result
 
 
 def get_snapshots(symbols):
@@ -141,25 +141,59 @@ def get_snapshots(symbols):
     return snapshots
 
 
-def get_recent_bars(symbol):
+def get_all_bars(symbols):
     end = datetime.now(timezone.utc)
     start = end - timedelta(minutes=35)
 
-    data = api_get(
-        DATA_URL,
-        f"/v2/stocks/{symbol}/bars",
-        {
-            "timeframe": "1Min",
-            "start": start.isoformat(),
-            "end": end.isoformat(),
-            "limit": 100,
-            "feed": "iex"
-        }
+    all_bars = {}
+
+    # 여러 종목의 1분봉을 한꺼번에 요청
+    # 페이지가 남아 있으면 이어서 조회
+    for offset in range(0, len(symbols), 50):
+        batch = symbols[offset:offset + 50]
+        page_token = None
+
+        while True:
+            params = {
+                "symbols": ",".join(batch),
+                "timeframe": "1Min",
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+                "limit": 10000,
+                "feed": "iex"
+            }
+
+            if page_token:
+                params["page_token"] = page_token
+
+            data = api_get(
+                DATA_URL,
+                "/v2/stocks/bars",
+                params
+            )
+
+            for symbol, bars in (
+                data.get("bars") or {}
+            ).items():
+                all_bars.setdefault(
+                    symbol, []
+                ).extend(bars or [])
+
+            page_token = data.get("next_page_token")
+
+            if not page_token:
+                break
+
+    print("Symbols with minute bars:", len(all_bars))
+    print(
+        "Total minute bars:",
+        sum(len(b) for b in all_bars.values())
     )
 
-    return data.get("bars") or []
+    return all_bars
 
-def analyze(symbol, snapshot):
+
+def analyze(symbol, snapshot, bars):
     trade = snapshot.get("latestTrade") or {}
     previous = snapshot.get("prevDailyBar") or {}
 
@@ -167,40 +201,30 @@ def analyze(symbol, snapshot):
     prev_close = previous.get("c")
 
     if not price or not prev_close:
-        return None
+        return None, "snapshot_missing"
 
     if not MIN_PRICE <= price <= MAX_PRICE:
-        return None
+        return None, "price_outside"
 
     change = (price / prev_close - 1) * 100
 
-    # 이미 크게 오른 종목은 초기 탐색에서 제외
     if change < -3 or change > 25:
-        return None
+        return None, "change_outside"
 
-    try:
-        bars = get_recent_bars(symbol)
-    except requests.RequestException as error:
-        print(symbol, "bar error:", error)
-        return None
-
-    if len(bars) < 4:
-        return None
+    if not bars:
+        return None, "bars_missing"
 
     now = datetime.now(timezone.utc)
 
-    def parse_time(bar):
-        return datetime.fromisoformat(
-            bar["t"].replace("Z", "+00:00")
-        )
-
     recent = []
-    previous_five = []
+    older = []
 
     for bar in bars:
         try:
-            bar_time = parse_time(bar)
-        except (ValueError, KeyError, TypeError):
+            bar_time = datetime.fromisoformat(
+                bar["t"].replace("Z", "+00:00")
+            )
+        except (KeyError, TypeError, ValueError):
             continue
 
         age = (now - bar_time).total_seconds()
@@ -208,10 +232,10 @@ def analyze(symbol, snapshot):
         if 0 <= age < 300:
             recent.append(bar)
         elif 300 <= age < 600:
-            previous_five.append(bar)
+            older.append(bar)
 
-    if len(recent) < 2 or len(previous_five) < 2:
-        return None
+    if len(recent) < 2 or len(older) < 2:
+        return None, "recent_bars_insufficient"
 
     recent.sort(key=lambda b: b["t"])
 
@@ -219,68 +243,45 @@ def analyze(symbol, snapshot):
     last_price = recent[-1].get("c")
 
     if not first_price or not last_price:
-        return None
+        return None, "bar_price_missing"
 
-    five_min_change = (
+    five_change = (
         last_price / first_price - 1
     ) * 100
 
     recent_volume = sum(
-        bar.get("v", 0) for bar in recent
+        b.get("v") or 0 for b in recent
+    )
+    older_volume = sum(
+        b.get("v") or 0 for b in older
     )
 
-    previous_volume = sum(
-        bar.get("v", 0) for bar in previous_five
-    )
+    if older_volume <= 0:
+        return None, "volume_missing"
 
-    if previous_volume <= 0:
-        return None
+    volume_ratio = recent_volume / older_volume
 
-    volume_ratio = recent_volume / previous_volume
-
-    # 최근 5분 가격과 거래량 동시 증가
-    if five_min_change >= 2 and volume_ratio >= 2:
+    if five_change >= 2 and volume_ratio >= 2:
         category = "🔥 강한 초기 급등 신호"
-
-    elif five_min_change >= 1 and volume_ratio >= 1.5:
+    elif five_change >= 1 and volume_ratio >= 1.5:
         category = "🚀 초기 상승 관심"
-
     else:
-        return None
+        return None, "conditions_not_met"
 
     return {
         "symbol": symbol,
-        "score": five_min_change * volume_ratio,
+        "score": five_change * volume_ratio,
         "message": (
             f"{category}\n"
             f"종목: {symbol}\n"
             f"가격: ${price:.4f}\n"
             f"전일 대비: {change:+.2f}%\n"
-            f"최근 5분 상승률: {five_min_change:+.2f}%\n"
+            f"최근 5분 상승률: {five_change:+.2f}%\n"
             f"최근 5분 거래량 비율: {volume_ratio:.2f}배\n"
             f"데이터: Alpaca IEX\n"
             f"※ 매수 신호 아님"
         )
-    }
-
-
-def load_state():
-    if not STATE_FILE.exists():
-        return {}
-
-    try:
-        return json.loads(
-            STATE_FILE.read_text(encoding="utf-8")
-        )
-    except (ValueError, OSError):
-        return {}
-
-
-def save_state(state):
-    STATE_FILE.write_text(
-        json.dumps(state),
-        encoding="utf-8"
-    )
+    }, "signal"
 
 
 def main():
@@ -303,20 +304,33 @@ def main():
 
     snapshots = get_snapshots(symbols)
 
+    bars_by_symbol = get_all_bars(symbols)
+
     signals = []
+    reasons = Counter()
 
     for symbol in symbols:
-        snapshot = snapshots.get(symbol) or {}
+        result, reason = analyze(
+            symbol,
+            snapshots.get(symbol) or {},
+            bars_by_symbol.get(symbol) or []
+        )
 
-        result = analyze(symbol, snapshot)
+        reasons[reason] += 1
 
         if result:
             signals.append(result)
+
+    print("Analysis diagnostics:")
+
+    for reason, count in sorted(reasons.items()):
+        print(f"  {reason}: {count}")
 
     print("Early signals found:", len(signals))
 
     if not signals:
         print("초기 급등 조건 충족 신호 없음")
+        print("Scan completed")
         return
 
     signals.sort(
@@ -324,30 +338,9 @@ def main():
         reverse=True
     )
 
-    state = load_state()
-    now_ts = time.time()
-    selected = []
-
-    for signal in signals:
-        symbol = signal["symbol"]
-
-        last_sent = state.get(symbol, 0)
-
-        if now_ts - last_sent < COOLDOWN_SECONDS:
-            continue
-
-        selected.append(signal)
-
-        if len(selected) >= 3:
-            break
-
-    if not selected:
-        print("All signals in cooldown")
-        return
-
     message = "📡 미국 저가주 초기 급등 탐색\n\n"
 
-    for signal in selected:
+    for signal in signals[:3]:
         addition = signal["message"] + "\n\n"
 
         if len(message + addition) > 1900:
@@ -355,12 +348,7 @@ def main():
 
         message += addition
 
-    if send_discord(message):
-        for signal in selected:
-            state[signal["symbol"]] = now_ts
-
-        save_state(state)
-
+    send_discord(message)
     print("Scan completed")
 
 
