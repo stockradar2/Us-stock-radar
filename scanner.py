@@ -151,11 +151,11 @@ def get_snapshots(symbols):
 
 def get_bars(symbols):
     
-    end = datetime.now(timezone.utc)
+    end = datetime.now(timezone.utc) - timedelta(minutes=20)
     start = end - timedelta(hours=24)
     print("Bars query UTC:", start.isoformat(), end.isoformat())
     print("Current UTC:", datetime.now(timezone.utc).isoformat())
-    print("Requested feed:", "iex")
+    print("Requested feed:", "sip")
     print("UTC now:", end.isoformat())
     print("Bars start:", start.isoformat())
     print("Bars end:", end.isoformat())
@@ -172,7 +172,7 @@ def get_bars(symbols):
                 "start": start.isoformat(),
                 "end": end.isoformat(),
                 "limit": 10000,
-                "feed": "iex"
+                "feed": "sip"
             }
 
             if token:
