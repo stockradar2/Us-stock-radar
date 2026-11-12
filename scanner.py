@@ -152,7 +152,7 @@ def get_snapshots(symbols):
 def get_bars(symbols):
     
     end = datetime.now(timezone.utc)
-    start = end - timedelta(minutes=24)
+    start = end - timedelta(hours=24)
     
     print("Current UTC:", datetime.now(timezone.utc).isoformat())
     print("Requested feed:", "iex")
