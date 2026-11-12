@@ -153,6 +153,9 @@ def get_bars(symbols):
     
     end = datetime.now(timezone.utc)
     start = end - timedelta(minutes=30)
+    
+    print("Current UTC:", datetime.now(timezone.utc).isoformat())
+    print("Requested feed: IEX")
     print("UTC now:", end.isoformat())
     print("Bars start:", start.isoformat())
     print("Bars end:", end.isoformat())
