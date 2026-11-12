@@ -379,7 +379,7 @@ def main():
 
     bars_by_symbol = get_bars(eligible)
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc) - timedelta(minutes=20)
     reasons = Counter()
     signals = []
 
