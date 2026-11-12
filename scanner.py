@@ -219,7 +219,7 @@ def analyze(symbol, snapshot, bars, now):
     day_change = (price / prev_close - 1) * 100
 
     # 이미 크게 오른 종목은 초기 신호에서 제외
-    if day_change < -5 or day_change > 25:
+    if day_change < -30 or day_change > 100:
         return None, "change_outside"
 
     if not bars:
