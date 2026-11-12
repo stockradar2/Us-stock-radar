@@ -150,7 +150,8 @@ def get_snapshots(symbols):
 
 
 def get_bars(symbols):
-    end = datetime.now(timezone.utc)
+    
+    end = datetime(2026, 11, 11, 21, 0, tzinfo=timezone.utc)
     start = end - timedelta(minutes=30)
     print("UTC now:", end.isoformat())
     print("Bars start:", start.isoformat())
