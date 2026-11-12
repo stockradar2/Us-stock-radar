@@ -275,20 +275,22 @@ def analyze(symbol, snapshot, bars, now):
     if recent_volume < 1000:
         return None, "low_volume"
 
-    if five_change >= 2 and volume_ratio >= 2:
+    
+    if five_change >= 1.5 and volume_ratio >= 2:
         category = "🔥 강한 초기 급등 관심"
         priority = 3
 
-    elif five_change >= 1 and volume_ratio >= 1.5:
+    elif five_change >= 0.5 and volume_ratio >= 1.5:
         category = "🚀 초기 상승 관심"
         priority = 2
 
-    elif five_change >= 0.5 and volume_ratio >= 3:
+    elif five_change >= 0 and volume_ratio >= 2:
         category = "👀 거래량 선행 관심"
         priority = 1
 
     else:
         return None, "conditions_not_met"
+
 
     score = (
         priority * 100
