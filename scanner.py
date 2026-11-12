@@ -155,7 +155,7 @@ def get_bars(symbols):
     start = end - timedelta(minutes=30)
     
     print("Current UTC:", datetime.now(timezone.utc).isoformat())
-    print("Requested feed: IEX")
+    print("Requested feed:", "iex")
     print("UTC now:", end.isoformat())
     print("Bars start:", start.isoformat())
     print("Bars end:", end.isoformat())
@@ -172,7 +172,7 @@ def get_bars(symbols):
                 "start": start.isoformat(),
                 "end": end.isoformat(),
                 "limit": 10000,
-                "feed": "sip"
+                "feed": "iex"
             }
 
             if token:
