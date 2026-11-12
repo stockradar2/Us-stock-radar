@@ -152,6 +152,9 @@ def get_snapshots(symbols):
 def get_bars(symbols):
     end = datetime.now(timezone.utc)
     start = end - timedelta(minutes=30)
+    print("UTC now:", end.isoformat())
+    print("Bars start:", start.isoformat())
+    print("Bars end:", end.isoformat())
     result = {}
 
     for offset in range(0, len(symbols), 50):
