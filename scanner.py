@@ -1,4 +1,4 @@
-
+.
 import os
 import json
 import time
@@ -176,7 +176,7 @@ def get_bars(symbols):
                 "/v2/stocks/bars",
                 params
             )
-
+            print("Bars API response:", str(data)[:500])
             for symbol, bars in (
                 data.get("bars") or {}
             ).items():
