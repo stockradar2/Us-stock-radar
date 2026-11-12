@@ -237,6 +237,8 @@ def analyze(symbol, snapshot, bars, now):
             continue
 
         age = (now - stamp).total_seconds()
+        if age >= 600:
+            print(f"{symbol}: old bar age={age:.0f}s")
         if age < 600:
             print(f"{symbol}: bar age={age:.0f}s")
         if 0 <= age < 300:
