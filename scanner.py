@@ -172,7 +172,7 @@ def get_bars(symbols):
                 "start": start.isoformat(),
                 "end": end.isoformat(),
                 "limit": 10000,
-                "feed": "iex"
+                "feed": "sip"
             }
 
             if token:
