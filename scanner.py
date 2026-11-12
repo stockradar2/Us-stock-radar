@@ -311,9 +311,12 @@ def analyze(symbol, snapshot, bars, now):
         f"※ 매수 신호 아님"
     )
 
+    
     return {
         "symbol": symbol,
         "score": score,
+        "priority": priority,
+        "category": category,
         "message": message
     }, "signal"
 
@@ -417,10 +420,14 @@ def main():
 
     for signal in signals:
         symbol = signal["symbol"]
-        last = state.get(symbol, 0)
+        category = signal.get("category", "")
+        priority = signal.get("priority", 0)
 
+        key = f"{symbol}:{priority}"
+        last = state.get(key, 0)
+ 
         if current_time - last < COOLDOWN:
-            continue
+           continue
 
         selected.append(signal)
 
@@ -447,7 +454,10 @@ def main():
 
     if included and send_discord(message):
         for signal in included:
-            state[signal["symbol"]] = current_time
+            symbol = signal["symbol"]
+            priority = signal.get("priority", 0)
+            key = f"{symbol}:{priority}"
+            state[key] = current_time
 
         save_state(state)
 
